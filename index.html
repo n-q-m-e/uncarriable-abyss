@@ -76,7 +76,6 @@ uniform vec3 uWaterMid;
 uniform vec3 uFogColor;
 uniform float uFogNear;
 uniform float uFogFar;
-uniform float uSunElevation;
 
 varying vec3 vWorldPos;
 varying vec3 vNormal;
@@ -98,17 +97,25 @@ float vnoise(vec2 p) {
                mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
 }
 
-// ─── Detail normal ───
+// ─── Detail normal — 2 scrolling layers (optimized) ───
 vec3 detailNormal(vec2 p, float t) {
     float e = 0.03;
     vec2 a = p * 3.0 + vec2(t * 0.02, t * 0.015);
-    vec2 b = p * 7.0 + vec2(-t * 0.018, t * 0.025);
+    vec2 b = p * 8.0 + vec2(-t * 0.018, t * 0.025);
 
-    float h  = vnoise(a) * 0.5 + vnoise(b) * 0.3;
-    float hx = vnoise(a + vec2(e, 0.0)) * 0.5 + vnoise(b + vec2(e, 0.0)) * 0.3;
-    float hz = vnoise(a + vec2(0.0, e)) * 0.5 + vnoise(b + vec2(0.0, e)) * 0.3;
+    float s1 = 0.55, s2 = 0.35;
+    float h  = vnoise(a)*s1 + vnoise(b)*s2;
+    float hx = vnoise(a+vec2(e,0.))*s1 + vnoise(b+vec2(e,0.))*s2;
+    float hz = vnoise(a+vec2(0.,e))*s1 + vnoise(b+vec2(0.,e))*s2;
 
-    return normalize(vec3(-(hx - h) / e * 0.22, 1.0, -(hz - h) / e * 0.22));
+    return normalize(vec3(-(hx-h)/e * 0.25, 1.0, -(hz-h)/e * 0.25));
+}
+
+// ─── Caustics — animated light patterns under surface ───
+float caustic(vec2 p, float t) {
+    float c1 = vnoise(p * 5.0 + vec2(t * 0.03, t * 0.02));
+    float c2 = vnoise(p * 5.0 + vec2(-t * 0.025, t * 0.035) + 4.3);
+    return pow(1.0 - abs(c1 - c2), 4.0);
 }
 
 // ─── Sky color for reflections ───
@@ -117,7 +124,6 @@ vec3 skyColor(vec3 dir) {
     vec3 sky = mix(uSkyHorizon, uSkyTop, pow(y, 0.4));
     float sd = max(dot(dir, uSunDir), 0.0);
     sky += uSunColor * pow(sd, 4.0) * 0.35;
-    // Warm horizon glow
     sky += vec3(1.0, 0.6, 0.3) * pow(sd, 2.0) * 0.1 * (1.0 - y);
     return sky;
 }
@@ -125,7 +131,7 @@ vec3 skyColor(vec3 dir) {
 void main() {
     vec3 V = normalize(uCameraPos - vWorldPos);
 
-    // Combine wave geometry normal + detail ripples
+    // Detail ripples + micro-waves on top of wave normals
     vec3 detN = detailNormal(vWorldPos.xz * 0.05, uTime);
     vec3 N = normalize(vNormal + (detN - vec3(0.0, 1.0, 0.0)) * 1.0);
 
@@ -137,18 +143,24 @@ void main() {
     vec3 R = reflect(-V, N);
     vec3 refl = skyColor(R);
 
-    // ─── Water body — depth variation for visible seabed illusion ───
+    // ─── Water body — richer turquoise ───
     float hf = smoothstep(-0.4, 0.5, vWaveHeight);
     vec3 waterBody = mix(uWaterDeep, uWaterMid, hf);
 
-    // Depth patches — darker/lighter zones simulating seabed
+    // Depth patches
     float depthVar = vnoise(vWorldPos.xz * 0.015 + 5.0) * 0.6
                    + vnoise(vWorldPos.xz * 0.04) * 0.3;
-    waterBody = mix(waterBody, waterBody * 1.4 + vec3(0.0, 0.04, 0.03), depthVar * 0.3);
+    waterBody = mix(waterBody, waterBody * 1.5 + vec3(0.0, 0.06, 0.05), depthVar * 0.3);
 
-    // SSS — light through crests
+    // ─── Caustics — animated light patterns in the water ───
+    float caust = caustic(vWorldPos.xz * 0.04, uTime);
+    // Caustics visible in troughs, fading on crests
+    float caustMask = (1.0 - smoothstep(-0.1, 0.3, vWaveHeight)) * (1.0 - fresnel);
+    waterBody += vec3(0.05, 0.12, 0.10) * caust * caustMask * 0.8;
+
+    // SSS — light through crests, more turquoise
     float sss = pow(max(dot(V, -uSunDir + N * 0.4), 0.0), 3.0);
-    waterBody += vec3(0.0, 0.35, 0.28) * sss * 0.4;
+    waterBody += vec3(0.0, 0.40, 0.32) * sss * 0.45;
 
     // Texture variation
     float tex = vnoise(vWorldPos.xz * 0.4 + uTime * 0.02) * 0.15;
@@ -164,32 +176,26 @@ void main() {
     // ─── Sun specular — extended sun path ───
     vec3 H = normalize(uSunDir + V);
     float NdotH = max(dot(N, H), 0.0);
-    // Sharp sun disc
-    color += uSunColor * pow(NdotH, 500.0) * 2.5;
-    // Broad sun path stretching across the water
-    color += uSunColor * pow(NdotH, 8.0) * 0.12;
-    // Medium glow bridge
-    color += uSunColor * pow(NdotH, 50.0) * 0.15;
+    color += uSunColor * pow(NdotH, 500.0) * 1.0;
+    color += uSunColor * pow(NdotH, 8.0) * 0.06;
+    color += uSunColor * pow(NdotH, 50.0) * 0.08;
 
-    // ─── Foam — realistic wispy trails on crests ───
+    // ─── Foam — wispy trails on crests ───
     float foamBase = smoothstep(0.15, 0.45, vWaveHeight);
-    // Multiple noise layers for organic wispy foam
     float foamNoise1 = vnoise(vec2(vWorldPos.x * 1.5, vWorldPos.z * 5.0) + uTime * 0.04);
     float foamNoise2 = vnoise(vec2(vWorldPos.x * 3.0 + 7.0, vWorldPos.z * 8.0) - uTime * 0.03);
     float foamNoise3 = vnoise(vWorldPos.xz * 12.0 + uTime * 0.06);
-    // Combine: large streaks * medium detail * fine breakup
     float foamPattern = foamNoise1 * 0.6 + foamNoise2 * 0.3 + foamNoise3 * 0.1;
     float foam = foamBase * smoothstep(0.28, 0.55, foamPattern);
-    // Foam edge softness — fade at edges for natural look
     foam *= smoothstep(0.0, 0.15, foam);
-    // Foam color — slight blue tint, not pure white
     vec3 foamColor = vec3(0.88, 0.92, 0.95);
     color = mix(color, foamColor, foam * 0.45);
 
-    // ─── Distance fog / atmospheric haze ───
+    // ─── Distance fog — matches sky horizon for seamless blend ───
     float fogFactor = smoothstep(uFogNear, uFogFar, vFogDepth);
-    // Haze gets warmer toward the sun direction
-    vec3 hazeColor = mix(uFogColor, uFogColor + vec3(0.08, 0.04, 0.0), fogFactor);
+    fogFactor = fogFactor * fogFactor;
+    // Use sky horizon color directly so water merges with sky at distance
+    vec3 hazeColor = uSkyHorizon;
     color = mix(color, hazeColor, fogFactor);
 
     // Tone map
@@ -199,7 +205,7 @@ void main() {
 }
 </script>
 
-<!-- ══════ Sky ══════ -->
+<!-- ══════ Sky with procedural clouds ══════ -->
 <script id="skyVert" type="x-shader/x-vertex">
 varying vec3 vDir;
 void main() {
@@ -212,13 +218,31 @@ void main() {
 <script id="skyFrag" type="x-shader/x-fragment">
 precision highp float;
 uniform vec3 uSkyTop, uSkyHorizon, uSunDir, uSunColor;
+uniform float uTime;
 varying vec3 vDir;
 
-// Simple hash for stars/grain
 float hash(vec2 p) {
     vec3 p3 = fract(vec3(p.xyx) * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
     return fract((p3.x + p3.y) * p3.z);
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1,0)), f.x),
+               mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), f.x), f.y);
+}
+
+// ─── Procedural clouds — FBM ───
+float fbm(vec2 p, float t) {
+    float f = 0.0;
+    f += 0.50 * vnoise(p * 1.0 + t * 0.008);
+    f += 0.25 * vnoise(p * 2.0 - t * 0.012);
+    f += 0.125 * vnoise(p * 4.0 + t * 0.006);
+    f += 0.0625 * vnoise(p * 8.0 - t * 0.01);
+    return f;
 }
 
 void main() {
@@ -226,15 +250,30 @@ void main() {
     float y = max(dir.y, 0.0);
     vec3 sky = mix(uSkyHorizon, uSkyTop, pow(y, 0.4));
 
+    // Sun
     float sd = max(dot(dir, uSunDir), 0.0);
-    // Warm wide haze
-    sky += vec3(1.0, 0.65, 0.3) * pow(sd, 2.5) * 0.18;
-    // Sun glow
-    sky += uSunColor * pow(sd, 6.0) * 0.45;
-    // Sun disc
-    sky += vec3(1.0, 0.97, 0.9) * pow(sd, 1500.0) * 3.5;
-    // Pink/coral tint near horizon when close to sun
-    sky += vec3(0.9, 0.4, 0.25) * pow(sd, 3.0) * (1.0 - y) * 0.12;
+    sky += vec3(1.0, 0.65, 0.3) * pow(sd, 2.5) * 0.10;
+    sky += uSunColor * pow(sd, 6.0) * 0.25;
+    sky += vec3(1.0, 0.97, 0.9) * pow(sd, 1500.0) * 2.0;
+    sky += vec3(0.9, 0.4, 0.25) * pow(sd, 3.0) * (1.0 - y) * 0.08;
+
+    // ─── Procedural clouds ───
+    if (dir.y > 0.01) {
+        // Project ray onto a cloud plane at height
+        vec2 cloudUv = dir.xz / (dir.y + 0.1) * 3.0;
+        float cloud = fbm(cloudUv, uTime);
+        // Shape clouds — threshold and soften
+        cloud = smoothstep(0.42, 0.7, cloud);
+        // Fade clouds near horizon to avoid hard cut
+        float horizonFade = smoothstep(0.01, 0.15, dir.y);
+        cloud *= horizonFade;
+        // Cloud color — lit by sun
+        float cloudLight = 0.7 + 0.3 * max(dot(dir, uSunDir), 0.0);
+        vec3 cloudColor = vec3(0.95, 0.95, 0.97) * cloudLight;
+        // Slight warm tint on sun-facing side
+        cloudColor += uSunColor * pow(sd, 3.0) * 0.15;
+        sky = mix(sky, cloudColor, cloud * 0.55);
+    }
 
     // Below horizon
     if (dir.y < 0.0) sky = mix(sky, uSkyHorizon * 0.75, smoothstep(0.0, -0.2, dir.y));
@@ -243,8 +282,8 @@ void main() {
 }
 </script>
 
-<!-- ══════ Post-process: film grain quad ══════ -->
-<script id="grainVert" type="x-shader/x-vertex">
+<!-- ══════ Post-process: grain + vignette + god rays ══════ -->
+<script id="postVert" type="x-shader/x-vertex">
 varying vec2 vUv;
 void main() {
     vUv = uv;
@@ -252,11 +291,12 @@ void main() {
 }
 </script>
 
-<script id="grainFrag" type="x-shader/x-fragment">
+<script id="postFrag" type="x-shader/x-fragment">
 precision highp float;
 uniform sampler2D uTexture;
 uniform float uTime;
 uniform vec2 uResolution;
+uniform vec2 uSunScreenPos;
 varying vec2 vUv;
 
 float hash(vec2 p) {
@@ -268,16 +308,31 @@ float hash(vec2 p) {
 void main() {
     vec3 color = texture2D(uTexture, vUv).rgb;
 
-    // Film grain — subtle, animated
+    // ─── God rays — lightweight radial blur from sun ───
+    vec2 sunUv = uSunScreenPos;
+    vec2 deltaUv = (vUv - sunUv) * 0.02;
+    vec2 sampleUv = vUv;
+    float godray = 0.0;
+    for (int i = 0; i < 8; i++) {
+        sampleUv -= deltaUv;
+        float lum = dot(texture2D(uTexture, sampleUv).rgb, vec3(0.3, 0.5, 0.2));
+        godray += lum;
+    }
+    godray /= 8.0;
+    float sunDist = length(vUv - sunUv);
+    float rayMask = smoothstep(0.7, 0.0, sunDist);
+    color += vec3(1.0, 0.92, 0.7) * godray * rayMask * 0.08;
+
+    // ─── Film grain ───
     float grain = hash(vUv * uResolution + fract(uTime * 3.7) * 100.0);
-    grain = (grain - 0.5) * 0.025;
+    grain = (grain - 0.5) * 0.02;
     color += grain;
 
-    // Very subtle vignette
+    // ─── Vignette ───
     vec2 uv = vUv * 2.0 - 1.0;
     float vig = 1.0 - dot(uv * 0.5, uv * 0.5);
     vig = smoothstep(0.0, 1.0, vig);
-    color *= 0.85 + vig * 0.15;
+    color *= 0.88 + vig * 0.12;
 
     gl_FragColor = vec4(color, 1.0);
 }
@@ -286,37 +341,31 @@ void main() {
 <script type="module">
 import * as THREE from 'three';
 
-// ─── Renderer ───
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 document.body.appendChild(renderer.domElement);
 
-// ─── Render target for post-processing ───
 const rtParams = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat };
 let renderTarget = new THREE.WebGLRenderTarget(window.innerWidth, window.innerHeight, rtParams);
 
-// ─── Scenes ───
 const scene = new THREE.Scene();
 const postScene = new THREE.Scene();
 const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
 
-// ─── Sun — animated elevation ───
-const baseSunAngle = 0.16; // starting low
+// ─── Sun ───
+const baseSunAngle = 0.16;
 const sunDir = new THREE.Vector3();
 const sunColor = new THREE.Color();
 const skyTop = new THREE.Color();
 const skyHorizon = new THREE.Color();
 
 function updateSun(t) {
-    // Sun slowly rises over ~5 minutes
     const elevation = baseSunAngle + t * 0.0003;
     const clampedElev = Math.min(elevation, 0.45);
     sunDir.set(0.3, clampedElev, -0.8).normalize();
 
-    // Colors evolve as sun rises — sky stays blue
     const warmth = Math.min(t * 0.0005, 1.0);
     sunColor.setRGB(1.0, 0.90 + warmth * 0.03, 0.62 + warmth * 0.08);
     skyTop.setRGB(0.18 + warmth * 0.05, 0.42 + warmth * 0.06, 0.82 + warmth * 0.04);
@@ -328,6 +377,7 @@ updateSun(0);
 const skyUniforms = {
     uSkyTop: { value: skyTop }, uSkyHorizon: { value: skyHorizon },
     uSunDir: { value: sunDir }, uSunColor: { value: sunColor },
+    uTime: { value: 0 },
 };
 scene.add(new THREE.Mesh(
     new THREE.SphereGeometry(900, 32, 16),
@@ -345,39 +395,46 @@ waterGeo.rotateX(-Math.PI / 2);
 
 const waterMat = new THREE.ShaderMaterial({
     uniforms: {
-        uTime:          { value: 0 },
-        uCameraPos:     { value: camera.position },
-        uSunDir:        { value: sunDir },
-        uSunColor:      { value: sunColor },
-        uSkyTop:        { value: skyTop },
-        uSkyHorizon:    { value: skyHorizon },
-        uSunElevation:  { value: baseSunAngle },
-        // Richer, more vivid water colors
-        uWaterDeep:     { value: new THREE.Color(0.005, 0.05, 0.12) },
-        uWaterMid:      { value: new THREE.Color(0.02, 0.20, 0.28) },
-        uFogColor:      { value: new THREE.Color(0.78, 0.74, 0.70) },
-        uFogNear:       { value: 80.0 },
-        uFogFar:        { value: 350.0 },
+        uTime:       { value: 0 },
+        uCameraPos:  { value: camera.position },
+        uSunDir:     { value: sunDir },
+        uSunColor:   { value: sunColor },
+        uSkyTop:     { value: skyTop },
+        uSkyHorizon: { value: skyHorizon },
+        // Richer turquoise palette
+        uWaterDeep:  { value: new THREE.Color(0.005, 0.06, 0.14) },
+        uWaterMid:   { value: new THREE.Color(0.02, 0.22, 0.30) },
+        uFogColor:   { value: new THREE.Color(0.72, 0.74, 0.80) },
+        uFogNear:    { value: 70.0 },
+        uFogFar:     { value: 250.0 },
     },
     vertexShader: document.getElementById('waterVert').textContent,
     fragmentShader: document.getElementById('waterFrag').textContent,
 });
-
 scene.add(new THREE.Mesh(waterGeo, waterMat));
 
-// ─── Film grain post-process ───
-const grainMat = new THREE.ShaderMaterial({
+// ─── Post-process ───
+const sunScreenPos = new THREE.Vector2();
+const postMat = new THREE.ShaderMaterial({
     uniforms: {
-        uTexture:    { value: renderTarget.texture },
-        uTime:       { value: 0 },
-        uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uTexture:      { value: renderTarget.texture },
+        uTime:         { value: 0 },
+        uResolution:   { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        uSunScreenPos: { value: sunScreenPos },
     },
-    vertexShader: document.getElementById('grainVert').textContent,
-    fragmentShader: document.getElementById('grainFrag').textContent,
+    vertexShader: document.getElementById('postVert').textContent,
+    fragmentShader: document.getElementById('postFrag').textContent,
     depthTest: false,
 });
-const grainQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), grainMat);
-postScene.add(grainQuad);
+postScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), postMat));
+
+// ─── Compute sun screen position for god rays ───
+const sunWorldPos = new THREE.Vector3();
+function updateSunScreenPos() {
+    sunWorldPos.copy(sunDir).multiplyScalar(500).add(camera.position);
+    sunWorldPos.project(camera);
+    sunScreenPos.set(sunWorldPos.x * 0.5 + 0.5, sunWorldPos.y * 0.5 + 0.5);
+}
 
 // ─── Resize ───
 window.addEventListener('resize', () => {
@@ -386,7 +443,7 @@ window.addEventListener('resize', () => {
     camera.updateProjectionMatrix();
     renderer.setSize(w, h);
     renderTarget.setSize(w, h);
-    grainMat.uniforms.uResolution.value.set(w, h);
+    postMat.uniforms.uResolution.value.set(w, h);
 });
 
 // ─── Loop ───
@@ -398,11 +455,12 @@ const lookTarget = new THREE.Vector3();
     requestAnimationFrame(animate);
     const t = clock.getElapsedTime();
 
-    // Update sun position & colors
     updateSun(t);
+    updateSunScreenPos();
 
     waterMat.uniforms.uTime.value = t;
-    grainMat.uniforms.uTime.value = t;
+    skyUniforms.uTime.value = t;
+    postMat.uniforms.uTime.value = t;
 
     // Gentle camera drift
     camera.position.x = basePos.x + Math.sin(t * 0.04) * 0.5;
@@ -416,7 +474,6 @@ const lookTarget = new THREE.Vector3();
     );
     camera.lookAt(lookTarget);
 
-    // Render scene to texture, then apply grain
     renderer.setRenderTarget(renderTarget);
     renderer.render(scene, camera);
     renderer.setRenderTarget(null);
