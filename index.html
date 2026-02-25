@@ -160,7 +160,7 @@ void main() {
 
     // SSS — light through crests, more turquoise
     float sss = pow(max(dot(V, -uSunDir + N * 0.4), 0.0), 3.0);
-    waterBody += vec3(0.0, 0.40, 0.32) * sss * 0.45;
+    waterBody += vec3(0.15, 0.25, 0.12) * sss * 0.5;
 
     // Texture variation
     float tex = vnoise(vWorldPos.xz * 0.4 + uTime * 0.02) * 0.15;
@@ -252,10 +252,10 @@ void main() {
 
     // Sun
     float sd = max(dot(dir, uSunDir), 0.0);
-    sky += vec3(1.0, 0.65, 0.3) * pow(sd, 2.5) * 0.10;
-    sky += uSunColor * pow(sd, 6.0) * 0.25;
-    sky += vec3(1.0, 0.97, 0.9) * pow(sd, 1500.0) * 2.0;
-    sky += vec3(0.9, 0.4, 0.25) * pow(sd, 3.0) * (1.0 - y) * 0.08;
+    sky += vec3(1.0, 0.45, 0.15) * pow(sd, 2.0) * 0.25;
+    sky += uSunColor * pow(sd, 5.0) * 0.35;
+    sky += vec3(1.0, 0.85, 0.5) * pow(sd, 1200.0) * 2.5;
+    sky += vec3(0.95, 0.3, 0.1) * pow(sd, 2.5) * (1.0 - y) * 0.2;
 
     // ─── Procedural clouds ───
     if (dir.y > 0.01) {
@@ -321,7 +321,7 @@ void main() {
     godray /= 8.0;
     float sunDist = length(vUv - sunUv);
     float rayMask = smoothstep(0.7, 0.0, sunDist);
-    color += vec3(1.0, 0.92, 0.7) * godray * rayMask * 0.08;
+    color += vec3(1.0, 0.55, 0.2) * godray * rayMask * 0.10;
 
     // ─── Film grain ───
     float grain = hash(vUv * uResolution + fract(uTime * 3.7) * 100.0);
@@ -355,21 +355,25 @@ const postCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
 
 // ─── Sun ───
-const baseSunAngle = 0.16;
+const baseSunAngle = 0.08;
 const sunDir = new THREE.Vector3();
 const sunColor = new THREE.Color();
 const skyTop = new THREE.Color();
 const skyHorizon = new THREE.Color();
 
 function updateSun(t) {
-    const elevation = baseSunAngle + t * 0.0003;
-    const clampedElev = Math.min(elevation, 0.45);
-    sunDir.set(0.3, clampedElev, -0.8).normalize();
+    // Sun slowly sinks toward the horizon
+    const elevation = baseSunAngle - t * 0.00008;
+    const clampedElev = Math.max(elevation, 0.03);
+    sunDir.set(0.5, clampedElev, -0.7).normalize();
 
-    const warmth = Math.min(t * 0.0005, 1.0);
-    sunColor.setRGB(1.0, 0.90 + warmth * 0.03, 0.62 + warmth * 0.08);
-    skyTop.setRGB(0.18 + warmth * 0.05, 0.42 + warmth * 0.06, 0.82 + warmth * 0.04);
-    skyHorizon.setRGB(0.72 + warmth * 0.06, 0.72 + warmth * 0.06, 0.78 + warmth * 0.06);
+    const fade = Math.min(t * 0.0004, 1.0);
+    // Warm orange/amber sun getting redder as it sets
+    sunColor.setRGB(1.0, 0.55 - fade * 0.1, 0.20 - fade * 0.05);
+    // Deep blue-purple sky darkening over time
+    skyTop.setRGB(0.12 + fade * 0.03, 0.15 + fade * 0.02, 0.38 + fade * 0.05);
+    // Warm orange-pink horizon
+    skyHorizon.setRGB(0.85 - fade * 0.05, 0.45 - fade * 0.03, 0.25 - fade * 0.02);
 }
 updateSun(0);
 
@@ -401,10 +405,10 @@ const waterMat = new THREE.ShaderMaterial({
         uSunColor:   { value: sunColor },
         uSkyTop:     { value: skyTop },
         uSkyHorizon: { value: skyHorizon },
-        // Richer turquoise palette
-        uWaterDeep:  { value: new THREE.Color(0.005, 0.06, 0.14) },
-        uWaterMid:   { value: new THREE.Color(0.02, 0.22, 0.30) },
-        uFogColor:   { value: new THREE.Color(0.72, 0.74, 0.80) },
+        // Sunset ocean — dark indigo to warm teal
+        uWaterDeep:  { value: new THREE.Color(0.01, 0.03, 0.08) },
+        uWaterMid:   { value: new THREE.Color(0.04, 0.12, 0.18) },
+        uFogColor:   { value: new THREE.Color(0.65, 0.38, 0.25) },
         uFogNear:    { value: 70.0 },
         uFogFar:     { value: 250.0 },
     },
